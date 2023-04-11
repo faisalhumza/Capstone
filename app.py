@@ -1,17 +1,18 @@
 import glob
 #import RPi.GPIO as GPIO # Uncomment when running on the pi
 import time
+import boto3
 
 import face_recognition
-from flask import send_from_directory
+from flask import jsonify, send_from_directory
 from flask_uploads import UploadSet, IMAGES, configure_uploads
 from flask_wtf import FlaskForm
 from flask_wtf.file import FileField, FileRequired, FileAllowed
 from wtforms import SubmitField
 from threading import Thread
+from datetime import datetime
 
 from ALPR import *
-from currentLocation import *
 from dbFunc import *
 from dbFunctions import find_lp_owner
 
@@ -19,14 +20,22 @@ from dbFunctions import find_lp_owner
 
 # Initialize app
 app = Flask(__name__, static_url_path='', )
+gAddress = ""
 
 # Code needed for image uploading
 app.config['SECRET_KEY'] = 'capstone123'
 app.config['UPLOADED_PHOTOS_DEST'] = 'uploads'
+app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
 
 photos = UploadSet('photos', IMAGES)
 configure_uploads(app, photos)
 
+sns_client = boto3.client(
+    'sns',
+    region_name='ca-central-1',
+    aws_access_key_id='',
+    aws_secret_access_key=''
+)
 
 class UploadForm(FlaskForm):
     photo = FileField(
@@ -66,7 +75,7 @@ process_this_frame = True
 
 
 def gen_frames(debug=False, filename=None):
-    """Generates facial predictions either from camera or local files"""  
+    """Generates facial predictions either from camera or local files"""
     if not debug:
         camera = cv2.VideoCapture(0)
 
@@ -80,15 +89,8 @@ def gen_frames(debug=False, filename=None):
             break
         else:
             # Resize frame of video to 1/4 size for faster face recognition processing
-            s_frame = cv2.resize(frame, (0, 0), fx=0.25, fy=0.25)
+            small_frame = cv2.resize(frame, (0, 0), fx=0.25, fy=0.25)
             # Convert the image from BGR color (which OpenCV uses) to RGB color (which face_recognition uses)
-
-            lp_text = readLP(s_frame)
-            print(lp_text)
-            font = cv2.FONT_HERSHEY_SIMPLEX
-            if lp_text is not None:
-                cv2.putText(s_frame, lp_text, (10, 50), font, 1, (0, 0, 255), 2, cv2.LINE_AA)
-            small_frame = cv2.resize(s_frame, (0, 0), fx=4, fy=4)
             rgb_small_frame = small_frame[:, :, ::-1]
 
             # Find all the faces and face encodings in the current frame of video
@@ -191,7 +193,7 @@ def lpPage():
     else:
         file_url = None
     my_string = ""
-    return render_template('lpPage.html', displayGpsResult=displayL(), form=form, file_url=file_url,
+    return render_template('lpPage.html', form=form, file_url=file_url,
                            display_lpResult=display_lpResult, display_oResult=display_oResult, display_iResult=display_iResult,
                            display_cResult=display_cResult,
                             my_string=display_cResult)
@@ -224,10 +226,107 @@ def updateAccuracy():
     return str(percent_accuracy) + "%"
 
 
-@app.route("/displayLocation")
-def displayLocation():
-    displayGpsResult = str(getLocation())
-    return displayGpsResult
+@app.route('/markers')
+def get_markers_data():
+    conn = sqlite3.connect('Database.db')
+    c = conn.cursor()
+    c.execute('SELECT latitude, longitude, name, date, time, threat, location FROM Markers')
+    data = c.fetchall()
+    conn.close()
+    markers = []
+    for item in data:
+        markers.append({
+            'lat': item[0],
+            'lng': item[1],
+            'name': item[2],
+            'date': item[3],
+            'time': item[4],
+            'threat': item[5],
+            'location': item[6]
+        })
+    return jsonify(markers)
+
+
+
+
+# Helper function to get the color of the threat for a specific Criminal
+def getThreatLevel(name):
+    conn = sqlite3.connect('Database.db')
+    c = conn.cursor()
+    c.execute('SELECT Colour FROM Criminals WHERE name = ?', (name,))
+    data = c.fetchone()
+    conn.close()
+    return data[0]
+
+
+@app.route('/insert_marker', methods=['POST'])
+def insert_marker():
+    data = request.get_json()
+    name = data['name']
+    latitude = data['latitude']
+    longitude = data['longitude']
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    date, time = timestamp.split(' ')
+    threat = data['threat']
+    location = data['address'] # get the value of gAddress
+
+    conn = sqlite3.connect('Database.db')
+    c = conn.cursor()
+    c.execute("SELECT * FROM Markers WHERE name=?", (name,))
+    existing_marker = c.fetchone()
+
+    if existing_marker is None:
+        c.execute("INSERT INTO Markers (name, latitude, longitude, date, time, threat, location) VALUES (?, ?, ?, ?, ?, ?, ?)", (name, latitude, longitude, date, time, threat, location))
+        conn.commit()
+        response = {'status': 'success', 'date': date, 'time': time}
+    else:
+        response = {'status': 'error', 'message': 'Marker with this name already exists'}
+
+    conn.close()
+
+    return jsonify(response)
+
+
+
+@app.route('/send-text', methods=['POST'])
+def send_text():
+    data = request.get_json()
+    phone_number = data['phone_number']
+    name = data['name']
+    latitude = data['latitude']
+    longitude = data['longitude']
+    date = data['date']
+    time = data['time']
+    threat = data['threat']
+    message = f'Alert: {name} is detected! Location: ({latitude}, {longitude}) Date: {date} Time: {time} Threat: {threat}'
+    response = sns_client.publish(
+        PhoneNumber=phone_number,
+        Message=message
+    )
+    return jsonify({'message': 'Text message sent!'})
+
+
+@app.route('/alarm.mp3')
+def play_alarm():
+    return send_from_directory(app.static_folder, 'alarm.mp3')
+
+
+@app.route('/criminals')
+def get_criminals_data():
+    conn = sqlite3.connect('Database.db')
+    c = conn.cursor()
+    c.execute('SELECT * FROM Criminals')
+    data = c.fetchall()
+    conn.close()
+    criminals = []
+    for item in data:
+        criminals.append({
+            'Name': item[0],
+            'Crime': item[1],
+            'Colour': item[2],
+        })
+    return jsonify(criminals)
+
 
 
 def test1():

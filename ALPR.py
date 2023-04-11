@@ -9,10 +9,10 @@ import pytesseract
 from dbFunc import plate_detected
 
 
-def readLP(frame):
+def readLP(filename):
     # pytesseract.pytesseract.tesseract_cmd= r'C:\Program Files\Tesseract-OCR\tesseract'
-    
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)  # gray image
+    image = cv2.imread("uploads/" + filename)
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)  # gray image
     noise_reduction = cv2.bilateralFilter(gray, 13, 15, 15)  # apply filters for noise reduction
     edged = cv2.Canny(noise_reduction, 30, 200)  # detect edges
 
@@ -29,19 +29,19 @@ def readLP(frame):
             break
 
     mask = np.zeros(gray.shape, np.uint8)  # mask image
-    if cnt is not None:
-        new_image = cv2.drawContours(mask, [cnt], 0, 255, -1)
-        new_image = cv2.bitwise_and(frame, frame, mask=mask)
+    new_image = cv2.drawContours(mask, [cnt], 0, 255, -1)
+    new_image = cv2.bitwise_and(image, image, mask=mask)
 
-        (x, y) = np.where(mask == 255)  # crop out masked image
-        (x1, y1) = (np.min(x), np.min(y))
-        (x2, y2) = (np.max(x), np.max(y))
-        crop = gray[x1:x2 + 1, y1:y2 + 1]
+    (x, y) = np.where(mask == 255)  # crop out masked image
+    (x1, y1) = (np.min(x), np.min(y))
+    (x2, y2) = (np.max(x), np.max(y))
+    crop = gray[x1:x2 + 1, y1:y2 + 1]
 
-        text = pytesseract.image_to_string(crop)
-        text = re.sub('[\W_]+', '', text)
+    text = pytesseract.image_to_string(crop)
+    text = re.sub('[\W_]+', '', text)
 
-        print("License plate number is: ", text)
-        return text
-    else:
-        return None
+    print("License plate number is: ", text)
+
+    d = deque(plate_detected(text))
+
+    return text
